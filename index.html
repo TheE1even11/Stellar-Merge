@@ -23,12 +23,15 @@
     background:rgba(12,16,40,.6);color:var(--cyan);font-size:18px;cursor:pointer;backdrop-filter:blur(6px);
     display:flex;align-items:center;justify-content:center;transition:transform .12s,background .12s}
   .icon-btn:hover{background:rgba(94,242,255,.15)} .icon-btn:active{transform:scale(.92)}
+  /* FIX #2: hidden panels are fully non-interactive (visibility + pointer-events) */
   .panel{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.94);
     width:min(92vw,420px);max-height:92vh;overflow:auto;padding:26px 24px;border-radius:22px;
     background:var(--panel);border:1px solid rgba(94,242,255,.28);backdrop-filter:blur(12px);
     box-shadow:0 0 0 1px rgba(255,94,224,.12) inset,0 30px 80px rgba(0,0,0,.6),0 0 60px rgba(94,242,255,.12);
-    text-align:center;opacity:0;pointer-events:none;transition:opacity .22s ease,transform .22s cubic-bezier(.2,1.4,.4,1)}
-  .panel.show{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1)}
+    text-align:center;opacity:0;visibility:hidden;pointer-events:none;
+    transition:opacity .22s ease,transform .22s cubic-bezier(.2,1.4,.4,1),visibility 0s linear .22s}
+  .panel.show{opacity:1;visibility:visible;pointer-events:auto;transform:translate(-50%,-50%) scale(1);
+    transition:opacity .22s ease,transform .22s cubic-bezier(.2,1.4,.4,1),visibility 0s}
   h1{font-size:44px;letter-spacing:.14em;line-height:1;font-weight:900;
     background:linear-gradient(90deg,var(--cyan),#fff,var(--mag));-webkit-background-clip:text;background-clip:text;color:transparent;
     filter:drop-shadow(0 0 18px rgba(94,242,255,.35))}
@@ -36,7 +39,8 @@
   h2{font-size:28px;letter-spacing:.2em;font-weight:800;color:var(--cyan)}
   h3{font-size:12px;letter-spacing:.3em;color:var(--dim);margin:18px 0 8px;font-weight:700}
   .tag{color:var(--dim);margin:10px 0 18px;font-size:14px}
-  button.big{pointer-events:auto;cursor:pointer;border:none;border-radius:14px;padding:14px 34px;font-size:18px;font-weight:800;letter-spacing:.2em;
+  /* FIX #2: no pointer-events:auto on buttons (they inherit from .panel.show) */
+  button.big{cursor:pointer;border:none;border-radius:14px;padding:14px 34px;font-size:18px;font-weight:800;letter-spacing:.2em;
     color:#061020;background:linear-gradient(135deg,var(--cyan),#9dfbff);box-shadow:0 8px 24px rgba(94,242,255,.35),0 0 0 2px rgba(255,255,255,.15) inset;
     transition:transform .12s,box-shadow .12s;margin:6px 4px;animation:pulse 1.8s ease-in-out infinite}
   button.big.alt{background:linear-gradient(135deg,#2a3260,#3b4680);color:var(--ink);box-shadow:0 8px 24px rgba(0,0,0,.35);animation:none}
@@ -110,9 +114,16 @@
 'use strict';
 
 /* ---------------------------------------------------------- CONSTANTS */
-const W = 480, H = 800;                 // logical playfield
-const L = 40, R = 440, FLOOR = 740, RIM = 200, DANGER_Y = 215, DROP_Y = 125;
+const W = 480, H = 800;
+const L = 40, R = 440, FLOOR = 740, RIM = 200, DANGER_Y = 215, DROP_Y = 125, CEIL = -80;
 const GRAV = 2300, SUB = 8, STEP = 1/60, DAMP = 0.9993, FLOOR_FRIC = 0.994, WALL_FRIC = 0.997;
+// FIX #1: physics safety limits
+const BOUNCE = 0.25;      // restitution against walls/floor/ceiling
+const MAX_V = 9;          // max speed in px per substep (~4300 px/s)
+const MAX_CORR = 5;       // max overlap correction per substep (px)
+const CORR = 0.85;        // fraction of overlap resolved per substep
+const GROW = 0.45;        // px per substep a merged body grows to its full radius
+const REST_V = 0.8;       // "at rest" threshold for overflow detection (px/substep)
 const DROP_COOLDOWN = 0.5, OVER_LIMIT = 1.6, COMBO_WINDOW = 1.4;
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const KEY_SCORES = 'stellar_merge_scores_v1', KEY_MUTE = 'stellar_merge_mute';
@@ -156,22 +167,19 @@ function buildBackground(){
   const grad = g.createLinearGradient(0,0,0,ch);
   grad.addColorStop(0,'#0a0d24'); grad.addColorStop(1,'#04050f');
   g.fillStyle = grad; g.fillRect(0,0,cw,ch);
-  // nebulae
   const rnd = rng(7);
   const neb = [['rgba(120,60,200,',0.22],['rgba(40,180,220,',0.16],['rgba(230,80,170,',0.14]];
-  neb.forEach(([col,a],i)=>{
+  neb.forEach(([col,a])=>{
     const x = cw*(0.2+0.6*rnd()), y = ch*(0.15+0.7*rnd()), rr = Math.max(cw,ch)*(0.35+0.25*rnd());
     const rg = g.createRadialGradient(x,y,0,x,y,rr);
     rg.addColorStop(0,col+a+')'); rg.addColorStop(1,col+'0)');
     g.fillStyle = rg; g.fillRect(0,0,cw,ch);
   });
-  // stars
   for(let i=0;i<Math.floor(cw*ch/4500);i++){
     const x = rnd()*cw, y = rnd()*ch, s = rnd()<0.08 ? 1.6 : rnd()*0.9+0.3;
     g.fillStyle = `rgba(255,255,255,${0.25+rnd()*0.65})`;
     g.beginPath(); g.arc(x,y,s,0,Math.PI*2); g.fill();
   }
-  // vignette
   const vg = g.createRadialGradient(cw/2,ch/2,Math.min(cw,ch)*0.35,cw/2,ch/2,Math.max(cw,ch)*0.75);
   vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.55)');
   g.fillStyle = vg; g.fillRect(0,0,cw,ch);
@@ -266,7 +274,7 @@ function buildSprites(){
     const g = c.getContext('2d'); g.scale(SS,SS); g.translate(T.r+pad,T.r+pad);
     drawTier(g,t,T.r);
     SPRITES[t] = {c, size};
-    if(t>=3){ // pulsing halo
+    if(t>=3){
       const hs = T.r*2.4; const h = document.createElement('canvas'); h.width=h.height=Math.ceil(hs);
       const hg = h.getContext('2d'); hg.translate(hs/2,hs/2);
       const rg = hg.createRadialGradient(0,0,T.r*0.6,0,0,hs/2);
@@ -319,7 +327,7 @@ const Audio = {
 };
 
 /* ---------------------------------------------------------- STATE */
-let state = 'start';            // start | playing | paused | over
+let state = 'start';
 let bodies = [], merges = [], landed = [];
 let particles = [], rings = [], popups = [];
 let score = 0, dispScore = 0, best = 0, bestTier = 0;
@@ -328,12 +336,17 @@ let dropX = W/2, current = 0, next = 0, dropCd = 0, dropPop = 1;
 let overTimer = 0, overDelay = 0, overShown = false, lastRank = -1;
 let floorOn = true, mergeOn = true;
 let trauma = 0, shakeX = 0, shakeY = 0, flash = 0, flashCol = '255,255,255';
-let time = 0, ticks = 0;
+let time = 0;
 const keys = {left:false,right:false};
 
 class Body {
-  constructor(x,y,t){ this.x=x; this.y=y; this.px=x; this.py=y; this.tier=t; this.r=TIERS[t].r; this.m=this.r*this.r;
-    this.angle=0; this.settled=false; this.dead=false; this.pop=0; this.sq=0; this.born=time; }
+  constructor(x,y,t,startR){
+    this.x=x; this.y=y; this.px=x; this.py=y; this.tier=t;
+    this.tr = TIERS[t].r;                      // target radius
+    this.r = startR!==undefined ? startR : this.tr;  // FIX #1: merged bodies start small and grow
+    this.m = this.r*this.r;
+    this.angle=0; this.settled=false; this.dead=false; this.pop=0; this.sq=0; this.born=time;
+  }
 }
 
 function randomTier(){
@@ -348,8 +361,11 @@ function physicsStep(dt){
   for(let s=0;s<SUB;s++){
     for(let i=0;i<bodies.length;i++){
       const b = bodies[i];
-      const vx = (b.x-b.px)*DAMP, vy = (b.y-b.py)*DAMP;
+      let vx = (b.x-b.px)*DAMP, vy = (b.y-b.py)*DAMP;
+      const sp = Math.sqrt(vx*vx+vy*vy);                    // FIX #1: speed cap
+      if(sp>MAX_V){ const k=MAX_V/sp; vx*=k; vy*=k; }
       b.px = b.x; b.py = b.y; b.x += vx; b.y += vy + g;
+      if(b.r<b.tr){ b.r = Math.min(b.tr, b.r+GROW); b.m = b.r*b.r; }   // gradual growth
       if(TIERS[b.tier].spin) b.angle += vx/b.r;
     }
     bounds(); collide(); bounds();
@@ -362,9 +378,14 @@ function physicsStep(dt){
 function bounds(){
   for(let i=0;i<bodies.length;i++){
     const b = bodies[i];
-    if(b.x-b.r<L){ b.x=L+b.r; b.py = b.y-(b.y-b.py)*WALL_FRIC; }
-    else if(b.x+b.r>R){ b.x=R-b.r; b.py = b.y-(b.y-b.py)*WALL_FRIC; }
-    if(floorOn && b.y+b.r>FLOOR){ b.y=FLOOR-b.r; b.px = b.x-(b.x-b.px)*FLOOR_FRIC; if(!b.settled){ b.settled=true; landed.push(b); } }
+    // FIX #1: proper reflection with restitution instead of implicit position kicks
+    if(b.x-b.r<L){ const vx=b.x-b.px; b.x=L+b.r; b.px=b.x+vx*BOUNCE; b.py=b.y-(b.y-b.py)*WALL_FRIC; }
+    else if(b.x+b.r>R){ const vx=b.x-b.px; b.x=R-b.r; b.px=b.x+vx*BOUNCE; b.py=b.y-(b.y-b.py)*WALL_FRIC; }
+    if(b.y-b.r<CEIL){ const vy=b.y-b.py; b.y=CEIL+b.r; b.py=b.y+vy*BOUNCE; }
+    if(floorOn && b.y+b.r>FLOOR){
+      const vy=b.y-b.py; b.y=FLOOR-b.r; b.py=b.y+vy*BOUNCE; b.px=b.x-(b.x-b.px)*FLOOR_FRIC;
+      if(!b.settled){ b.settled=true; landed.push(b); }
+    }
   }
 }
 function collide(){
@@ -379,9 +400,9 @@ function collide(){
       if(!b.settled){ b.settled=true; landed.push(b); }
       if(mergeOn && a.tier===b.tier){ a.dead=b.dead=true; merges.push([a,b]); continue; }
       let d = Math.sqrt(dx*dx+dy*dy); if(d<0.001){ d=0.001; dx=0.001; dy=0; }
-      const nx = dx/d, ny = dy/d, ov = rs-d, tm = a.m+b.m, wa = b.m/tm, wb = a.m/tm;
+      const nx = dx/d, ny = dy/d, tm = a.m+b.m, wa = b.m/tm, wb = a.m/tm;
+      const ov = Math.min((rs-d)*CORR, MAX_CORR);           // FIX #1: soft, capped correction
       a.x -= nx*ov*wa; a.y -= ny*ov*wa; b.x += nx*ov*wb; b.y += ny*ov*wb;
-      // tangential friction
       const rvx = (a.x-a.px)-(b.x-b.px), rvy = (a.y-a.py)-(b.y-b.py);
       const vn = rvx*nx+rvy*ny, tx = rvx-vn*nx, ty = rvy-vn*ny, f = 0.03;
       a.px += tx*f*wa; a.py += ty*f*wa; b.px -= tx*f*wb; b.py -= ty*f*wb;
@@ -394,7 +415,7 @@ function doMerge(a,b){
   lastMergeAt = time; comboTimer = COMBO_WINDOW;
   const mult = 1+Math.min(combo-1,6)*0.5;
   const col = TIERS[t].c;
-  if(t===TIERS.length-1){ // black holes annihilate
+  if(t===TIERS.length-1){
     const pts = Math.round(1000*mult); score += pts;
     burst(mx,my,90,col,10,900); rings.push({x:mx,y:my,r:20,max:520,life:0.9,t:0.9,col:'#ffffff',w:14});
     rings.push({x:mx,y:my,r:10,max:320,life:0.6,t:0.6,col:col,w:8});
@@ -402,14 +423,15 @@ function doMerge(a,b){
     addShake(1.1); flash = 0.7; flashCol='255,170,80'; Audio.blackhole(); bestTier = Math.max(bestTier,t); return;
   }
   const pts = Math.round(BASE[t]*10*mult); score += pts;
-  const nb = new Body(mx,my,t+1);
+  const nb = new Body(mx,my,t+1,TIERS[t].r);   // FIX #1: spawn at parent radius, grow to full
   nb.px = mx-((a.x-a.px)+(b.x-b.px))/2; nb.py = my-((a.y-a.py)+(b.y-b.py))/2 + 0.6;
   nb.settled = true; nb.pop = 1; bodies.push(nb);
   bestTier = Math.max(bestTier,t+1);
+  const fr = TIERS[t+1].r;
   burst(mx,my,12+t*4,col,3+t*0.6,260+t*40);
-  rings.push({x:mx,y:my,r:nb.r*0.6,max:nb.r*2.4+40,life:0.4,t:0.4,col:col,w:4+t*0.5});
-  popup(mx,my-nb.r-14,'+'+pts,col,22+t*2);
-  if(combo>1) popup(mx,my-nb.r-14-(26+t*2),'COMBO x'+combo,'#ffd66b',16+Math.min(combo,6)*1.5);
+  rings.push({x:mx,y:my,r:fr*0.6,max:fr*2.4+40,life:0.4,t:0.4,col:col,w:4+t*0.5});
+  popup(mx,my-fr-14,'+'+pts,col,22+t*2);
+  if(combo>1) popup(mx,my-fr-14-(26+t*2),'COMBO x'+combo,'#ffd66b',16+Math.min(combo,6)*1.5);
   addShake(0.15+t*0.075); if(t>=6){ flash = 0.12+t*0.03; flashCol = hexRGB(col); }
   Audio.merge(t+1,combo);
 }
@@ -464,7 +486,7 @@ function drop(){
 }
 function gameOver(){
   state='over'; mergeOn=false; floorOn=false; overDelay=0; overShown=false;
-  for(const b of bodies){ b.px = b.x-(Math.random()-0.5)*14; b.py = b.y+6+Math.random()*10; }
+  for(const b of bodies){ b.px = b.x-(Math.random()-0.5)*6; b.py = b.y+2+Math.random()*4; }
   addShake(1); flash=0.6; flashCol='255,80,90'; Audio.over();
   lastRank = saveScore(score,bestTier);
   document.getElementById('finalScore').textContent = score.toLocaleString();
@@ -499,19 +521,19 @@ function update(dt){
   if(state==='playing'){
     if(keys.left) dropX -= 460*dt; if(keys.right) dropX += 460*dt; clampDrop();
     dropCd = Math.max(0,dropCd-dt); dropPop = Math.min(1,dropPop+dt*3.2);
-    // overflow check
+    // FIX #1: only bodies that are settled AND nearly at rest count as overflow
     let over = false;
-    for(const b of bodies){ if(b.settled && b.y-b.r < DANGER_Y){ over=true; break; } }
+    for(const b of bodies){
+      if(b.settled && b.y-b.r < DANGER_Y && Math.abs(b.y-b.py) < REST_V){ over=true; break; }
+    }
     overTimer = over ? overTimer+dt : Math.max(0,overTimer-dt*2);
     if(overTimer>=OVER_LIMIT) gameOver();
   } else if(state==='over'){
     overDelay += dt;
     if(!overShown && overDelay>0.9){ overShown=true; setState('over'); }
   }
-  // landing feedback
   if(landed.length){
     for(const b of landed){
-      const T = TIERS[b.tier];
       for(let i=0;i<4+b.tier && particles.length<420;i++){ const a=Math.PI+Math.random()*Math.PI; particles.push({x:b.x+Math.cos(a)*b.r*0.3,y:b.y+b.r*0.7,vx:(Math.random()-0.5)*160,vy:-Math.random()*60,life:0.3+Math.random()*0.3,t:1,s:2+b.tier*0.4,col:'#ffffff',spark:false}); }
       b.sq = 1; if(b.tier>=3) addShake(0.03+b.tier*0.02); Audio.land(b.tier);
     }
@@ -523,51 +545,41 @@ function update(dt){
 /* ---------------------------------------------------------- RENDER */
 function landingY(){
   const r = TIERS[current].r; let y = FLOOR-r;
-  for(const b of bodies){ const dx = Math.abs(b.x-dropX), rs = b.r+r; if(dx<rs){ const cy = b.y-Math.sqrt(rs*rs-dx*dx); if(cy<y) y=cy; } }
+  for(const b of bodies){ const dx = Math.abs(b.x-dropX), rs = b.tr+r; if(dx<rs){ const cy = b.y-Math.sqrt(rs*rs-dx*dx); if(cy<y) y=cy; } }
   return Math.max(DROP_Y, y);
 }
 function render(){
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.drawImage(bg,0,0,cw,ch);
-  // twinkles
   for(const s of twinkles){ const a = 0.25+0.75*Math.abs(Math.sin(time*s.sp+s.ph)); ctx.fillStyle=`rgba(255,255,255,${a})`; ctx.beginPath(); ctx.arc(s.x*cw,s.y*ch,s.s,0,6.283); ctx.fill(); }
 
   ctx.translate(ox+shakeX*scale, oy+shakeY*scale); ctx.scale(scale,scale);
   drawContainer();
-  // bodies
   for(const b of bodies){
-    const T = TIERS[b.tier];
     if(HALOS[b.tier]){ const h = HALOS[b.tier]; const pa = 0.35+0.25*Math.sin(time*3+b.born*7); ctx.globalAlpha = pa; ctx.drawImage(h.c,b.x-h.size/2,b.y-h.size/2,h.size,h.size); ctx.globalAlpha = 1; }
     const pop = b.pop>0 ? 1+Math.sin(b.pop*Math.PI)*0.28 : 1;
     const sqy = b.sq>0 ? 1-Math.sin(b.sq*Math.PI)*0.12 : 1;
     ctx.save(); ctx.translate(b.x,b.y); ctx.scale(pop/Math.sqrt(sqy),pop*sqy);
     drawSprite(ctx,b.tier,0,0,1,b.angle); ctx.restore();
-    void T;
   }
   drawEffects();
   if(state==='playing'||state==='paused') drawDropper();
   drawHUD();
-  // flash
   if(flash>0){ ctx.setTransform(dpr,0,0,dpr,0,0); ctx.fillStyle=`rgba(${flashCol},${flash*0.45})`; ctx.fillRect(0,0,cw,ch); }
   if(overTimer>0 && state==='playing'){ ctx.setTransform(dpr,0,0,dpr,0,0); const a=(overTimer/OVER_LIMIT)*(0.25+0.15*Math.sin(time*12)); ctx.fillStyle=`rgba(255,60,80,${a})`; ctx.fillRect(0,0,cw,ch); }
 }
 function drawContainer(){
   const danger = overTimer/OVER_LIMIT;
-  // well body
   ctx.beginPath(); ctx.moveTo(L,RIM); ctx.lineTo(L,FLOOR-22); ctx.quadraticCurveTo(L,FLOOR,L+22,FLOOR); ctx.lineTo(R-22,FLOOR); ctx.quadraticCurveTo(R,FLOOR,R,FLOOR-22); ctx.lineTo(R,RIM);
   const fg = ctx.createLinearGradient(0,RIM,0,FLOOR); fg.addColorStop(0,'rgba(20,26,70,0.25)'); fg.addColorStop(1,'rgba(60,20,90,0.5)');
   ctx.fillStyle = fg; ctx.fill();
-  // edge glow
   ctx.lineWidth = 8; ctx.strokeStyle = danger>0?`rgba(255,80,100,${0.15+danger*0.3})`:'rgba(94,242,255,0.12)'; ctx.stroke();
   ctx.lineWidth = 2.5;
   const sg = ctx.createLinearGradient(L,0,R,0); sg.addColorStop(0,'#5ef2ff'); sg.addColorStop(1,'#ff5ee0');
   ctx.strokeStyle = danger>0?`rgba(255,${120-danger*60},${140-danger*60},1)`:sg; ctx.stroke();
-  // rim caps
   ctx.fillStyle='#5ef2ff'; ctx.beginPath(); ctx.arc(L,RIM,4,0,6.283); ctx.fill(); ctx.fillStyle='#ff5ee0'; ctx.beginPath(); ctx.arc(R,RIM,4,0,6.283); ctx.fill();
-  // floor glow line
   const fl = ctx.createLinearGradient(L,0,R,0); fl.addColorStop(0,'rgba(94,242,255,0)'); fl.addColorStop(0.5,'rgba(255,255,255,0.5)'); fl.addColorStop(1,'rgba(255,94,224,0)');
   ctx.fillStyle = fl; ctx.fillRect(L+10,FLOOR-3,R-L-20,3);
-  // danger line
   const pulse = 0.25+danger*0.6+ (danger>0?0.15*Math.sin(time*14):0);
   ctx.save(); ctx.setLineDash([10,10]); ctx.lineDashOffset = -time*40; ctx.lineWidth = 2;
   ctx.strokeStyle = `rgba(255,${danger>0?90:190},${danger>0?110:220},${pulse})`;
@@ -583,7 +595,6 @@ function drawDropper(){
     ctx.globalAlpha = 0.16; drawSprite(ctx,current,dropX,ly,1,0); ctx.globalAlpha = 1;
   }
   const s = 0.4+0.6*easeOutBack(dropPop);
-  // hanger
   ctx.strokeStyle='rgba(94,242,255,0.5)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(dropX,70); ctx.lineTo(dropX,y-T.r*s-4); ctx.stroke();
   ctx.fillStyle='#5ef2ff'; ctx.beginPath(); ctx.arc(dropX,70,4,0,6.283); ctx.fill();
   drawSprite(ctx,current,dropX,y,s,0);
@@ -629,10 +640,10 @@ function frame(now){
 
 /* ---------------------------------------------------------- INPUT */
 function gx(e){ return (e.clientX-ox)/scale; }
-let dragging = false, downX = 0, downT = 0;
+let dragging = false;
 canvas.addEventListener('pointerdown', e=>{
   Audio.unlock(); if(state!=='playing') return;
-  dragging = true; downX = e.clientX; downT = performance.now(); dropX = gx(e); clampDrop();
+  dragging = true; dropX = gx(e); clampDrop();
   try{ canvas.setPointerCapture(e.pointerId); }catch(err){}
 });
 canvas.addEventListener('pointermove', e=>{
@@ -663,7 +674,7 @@ window.addEventListener('keyup', e=>{
   if(c==='ArrowLeft'||c==='KeyA') keys.left=false;
   if(c==='ArrowRight'||c==='KeyD') keys.right=false;
 });
-window.addEventListener('blur', ()=>{ keys.left=keys.right=false; if(state==='playing') setState('paused'); });
+window.addEventListener('blur', ()=>{ keys.left=keys.right=false; dragging=false; if(state==='playing') setState('paused'); });
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden && state==='playing') setState('paused'); });
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', ()=>setTimeout(resize,120));
@@ -683,7 +694,6 @@ function toggleMute(){ Audio.muted = !Audio.muted; $('btnMute').textContent = Au
 /* ---------------------------------------------------------- BOOT */
 buildSprites();
 try{ if(localStorage.getItem(KEY_MUTE)==='1'){ Audio.muted=true; $('btnMute').textContent='🔇'; } }catch(e){}
-// fusion chain preview
 const chain = $('chain');
 TIERS.forEach((T,t)=>{
   const c = document.createElement('canvas'); c.width=c.height=68; const g=c.getContext('2d');
